@@ -1,7 +1,17 @@
+
 const express = require('express')
 const cors = require('cors')
 require('dotenv').config()
 const { MercadoPagoConfig, Preference } = require('mercadopago')
+const admin = require('firebase-admin')
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+ 
+// Inicializar Firebase Admin
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+})
+ 
+const db = admin.firestore()
  
 const app = express()
 app.use(cors())
@@ -43,6 +53,7 @@ app.post('/create-preference', async (req, res) => {
         },
         auto_return: 'approved',
         external_reference: orderId,
+        notification_url: 'https://payment-server-n1wt.onrender.com/webhook',
       },
     })
  
@@ -57,12 +68,15 @@ app.post('/create-preference', async (req, res) => {
   }
 })
  
-// Webhook de MercadoPago
+// Webhook de MercadoPago — actualiza estado del pedido automáticamente
 app.post('/webhook', async (req, res) => {
   try {
     const { type, data } = req.body
  
+    console.log('Webhook recibido:', type, data)
+ 
     if (type === 'payment' && data?.id) {
+      // Obtener info del pago desde MercadoPago
       const mpResponse = await fetch(
         `https://api.mercadopago.com/v1/payments/${data.id}`,
         {
@@ -71,11 +85,29 @@ app.post('/webhook', async (req, res) => {
           },
         }
       )
-      const payment = await mpResponse.json()
-      console.log('Pago recibido:', payment.status, 'Orden:', payment.external_reference)
  
-      // Aqui puedes actualizar Firestore si quieres
-      // usando firebase-admin
+      const payment = await mpResponse.json()
+      console.log('Pago:', payment.status, '| Orden:', payment.external_reference)
+ 
+      const orderId = payment.external_reference
+ 
+      if (orderId) {
+        // Mapear estado de MercadoPago a estado de la tienda
+        let newStatus = 'pending'
+        if (payment.status === 'approved') newStatus = 'paid'
+        else if (payment.status === 'rejected') newStatus = 'cancelled'
+        else if (payment.status === 'in_process') newStatus = 'pending'
+ 
+        // Actualizar pedido en Firestore
+        await db.collection('orders').doc(orderId).update({
+          status: newStatus,
+          paymentId: String(data.id),
+          paymentStatus: payment.status,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+ 
+        console.log(`Pedido ${orderId} actualizado a: ${newStatus}`)
+      }
     }
  
     res.status(200).json({ received: true })
